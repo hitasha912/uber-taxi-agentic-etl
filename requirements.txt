@@ -1,0 +1,6 @@
+pyspark
+pandas
+langchain
+langchain-openai
+langgraph
+openai
