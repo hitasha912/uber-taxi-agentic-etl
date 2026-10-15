@@ -1,0 +1,640 @@
+# Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# dependencies = [
+#   "langchain==0.3.27",
+#   "langchain-core==0.3.72",
+#   "langchain-community==0.3.27",
+#   "langgraph==0.6.2",
+#   "langchain-openai==0.3.27",
+# ]
+# ///
+# MAGIC %md
+# MAGIC # Agentic ETL Pipeline for NCR Ride Bookings
+
+# COMMAND ----------
+
+# MAGIC %pip install langchain==0.3.27 langchain-core==0.3.72 langchain-community==0.3.27 langgraph==0.6.2 langchain-openai==0.3.27
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
+import langchain
+import langgraph
+import langchain_openai
+
+print("LangChain:", langchain.__version__)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Environment Initialization
+# MAGIC
+# MAGIC The project source directory is added to the Python path so that the ETL,
+# MAGIC quality-check, analytics, and agent modules can be imported from the Databricks
+# MAGIC workspace.
+
+# COMMAND ----------
+
+import sys
+import importlib
+
+PROJECT_SRC = "/Workspace/CAPSTONE_3/uber-taxi-agentic-etl/src"
+
+if PROJECT_SRC not in sys.path:
+    sys.path.insert(0, PROJECT_SRC)
+
+importlib.invalidate_caches()
+
+print("Project environment initialized successfully.")
+print(f"Source directory: {PROJECT_SRC}")
+
+# COMMAND ----------
+
+# MAGIC %md import importlib, sys
+# MAGIC
+# MAGIC src_path = "/Workspace/CAPSTONE_3/uber-taxi-agentic-etl/src"
+# MAGIC if src_path in sys.path:
+# MAGIC     sys.path.remove(src_path)
+# MAGIC sys.path.insert(0, src_path)
+# MAGIC
+# MAGIC for mod_name in ['config', 'etl_pipeline']:
+# MAGIC     sys.modules.pop(mod_name, None)
+# MAGIC importlib.invalidate_caches()
+# MAGIC
+# MAGIC from etl_pipeline import run_etl
+# MAGIC
+# MAGIC result = run_etl(spark)
+# MAGIC
+# MAGIC print("ETL execution result:")
+# MAGIC print(result)
+# MAGIC  
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Load Project Configuration
+
+# COMMAND ----------
+
+from config import (
+    source_path,
+    bronze_path,
+    silver_path,
+    gold_daily_path,
+    gold_location_path,
+    gold_payment_path
+)
+
+print("Source and storage locations loaded.\n")
+
+print(f"Source      : {source_path}")
+print(f"Bronze      : {bronze_path}")
+print(f"Silver      : {silver_path}")
+print(f"Gold Daily  : {gold_daily_path}")
+print(f"Gold Location: {gold_location_path}")
+print(f"Gold Payment : {gold_payment_path}")
+
+# COMMAND ----------
+
+# MAGIC %md from config import (
+# MAGIC     bronze_path,
+# MAGIC     silver_path,
+# MAGIC     gold_daily_path,
+# MAGIC     gold_location_path,
+# MAGIC     gold_payment_path
+# MAGIC )
+# MAGIC
+# MAGIC bronze_df = spark.read.format("delta").load(bronze_path)
+# MAGIC silver_df = spark.read.format("delta").load(silver_path)
+# MAGIC
+# MAGIC bronze_df.show(5, truncate=False)
+# MAGIC silver_df.show(5, truncate=False)
+# MAGIC
+# MAGIC spark.read.format("delta").load(gold_daily_path).show(10, truncate=False)
+# MAGIC spark.read.format("delta").load(gold_location_path).show(10, truncate=False)
+# MAGIC spark.read.format("delta").load(gold_payment_path).show(10, truncate=False)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Source Dataset Verification
+# MAGIC
+
+# COMMAND ----------
+
+from pyspark.sql import functions as F
+
+source_df = (
+    spark.read
+    .option("header", True)
+    .option("inferSchema", True)
+    .csv(source_path)
+)
+
+print(f"Source row count: {source_df.count():,}")
+print(f"Number of columns: {len(source_df.columns)}")
+
+print("\nSource columns:")
+print(source_df.columns)
+
+display(source_df.limit(10))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ##Execute the ETL Pipeline
+
+# COMMAND ----------
+
+from etl_pipeline import run_etl
+
+print("=" * 70)
+print("STARTING ETL PIPELINE")
+print("=" * 70)
+
+etl_status = run_etl(spark)
+
+print("\nETL execution result:")
+print(etl_status)
+
+# COMMAND ----------
+
+if etl_status.get("status") == "success":
+    print("✓ ETL pipeline completed successfully.")
+else:
+    print("✗ ETL pipeline reported a failure.")
+    print(etl_status)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Inspect the Medallion Architecture
+# MAGIC
+# MAGIC The generated Delta datasets are inspected layer by layer.
+# MAGIC
+# MAGIC - **Bronze:** Raw ingested data
+# MAGIC - **Silver:** Cleaned and validated data
+# MAGIC - **Gold:** Business-oriented analytical summaries
+
+# COMMAND ----------
+
+def inspect_layer(layer_name, path, rows=5):
+    df = spark.read.format("delta").load(path)
+
+    print("\n" + "=" * 65)
+    print(f"{layer_name.upper()} LAYER")
+    print("=" * 65)
+    print(f"Rows    : {df.count():,}")
+    print(f"Columns : {len(df.columns)}")
+
+    df.printSchema()
+    display(df.limit(rows))
+
+    return df
+
+# COMMAND ----------
+
+bronze_df = inspect_layer(
+    "Bronze",
+    bronze_path
+)
+
+silver_df = inspect_layer(
+    "Silver",
+    silver_path
+)
+
+# COMMAND ----------
+
+daily_gold_df = inspect_layer(
+    "Gold - Daily Summary",
+    gold_daily_path
+)
+
+location_gold_df = inspect_layer(
+    "Gold - Location Summary",
+    gold_location_path
+)
+
+payment_gold_df = inspect_layer(
+    "Gold - Payment Summary",
+    gold_payment_path
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Silver Layer Data Quality Validation
+# MAGIC
+
+# COMMAND ----------
+
+from quality_checks import run_quality_checks
+
+quality_report = run_quality_checks(spark)
+
+print("=" * 70)
+print("SILVER DATA QUALITY REPORT")
+print("=" * 70)
+
+for metric, value in quality_report.items():
+    print(f"{metric:25}: {value}")
+
+# COMMAND ----------
+
+if quality_report.get("status") == "passed":
+    print("\n✓ Silver layer passed all configured quality checks.")
+else:
+    print("\n⚠ Silver layer requires attention.")
+
+print(f"\nValidated records: {quality_report.get('row_count', 0):,}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Gold Layer Business Analytics
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ###Top Pickup Locations
+
+# COMMAND ----------
+
+top_pickups = (
+    silver_df
+    .groupBy("Pickup_Location")
+    .agg(
+        F.count("*").alias("trip_count")
+    )
+    .orderBy(
+        F.desc("trip_count")
+    )
+    .limit(10)
+)
+
+top_pickups.show(10, truncate=False)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ###Payment Method Analysis
+
+# COMMAND ----------
+
+payment_analysis = (
+    silver_df
+    .groupBy("Payment_Method")
+    .agg(
+        F.count("*").alias("trip_count"),
+        F.round(F.sum("Booking_Value"), 2).alias("total_booking_value")
+    )
+    .orderBy(F.desc("trip_count"))
+)
+
+payment_analysis.show(10, truncate=False)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ###Vehicle Type Performance
+
+# COMMAND ----------
+
+vehicle_analysis = (
+    silver_df
+    .groupBy("Vehicle_Type")
+    .agg(
+        F.count("*").alias("trip_count"),
+        F.round(F.avg("Ride_Distance"), 2).alias("average_distance"),
+        F.round(F.avg("Booking_Value"), 2).alias("average_booking_value"),
+        F.round(F.avg("Driver_Ratings"), 2).alias("average_driver_rating")
+    )
+    .orderBy(F.desc("trip_count"))
+)
+
+vehicle_analysis.show(10, truncate=False)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Build the Agentic Workflow
+
+# COMMAND ----------
+
+from agents import build_agent_graph
+
+agent_workflow = build_agent_graph(spark)
+
+print("LangGraph agent workflow compiled successfully.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Inspect the Agent Workflow
+
+# COMMAND ----------
+
+from IPython.display import Image, display
+
+graph_image = agent_workflow.get_graph().draw_mermaid_png()
+
+display(Image(graph_image))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Create a Reusable Agent Query Interface
+# MAGIC
+# MAGIC A small helper function is used to submit different business or technical
+# MAGIC questions to the same agent workflow.
+
+# COMMAND ----------
+
+def ask_agent(question):
+    response = agent_workflow.invoke({
+        "query": question
+    })
+
+    return response
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Test the ETL Agent
+
+# COMMAND ----------
+
+etl_test = ask_agent(
+    "Run ETL on the NCR ride bookings CSV, validate Silver data, and analyze Gold metrics."
+)
+
+print("Selected route :", etl_test.get("route"))
+print("\nETL result:")
+print(etl_test.get("etl_result"))
+
+print("\nQuality result:")
+print(etl_test.get("quality_result"))
+
+print("\nAnalytics result:")
+print(etl_test.get("analytics_result"))
+
+print("\nAgent answer:")
+print(etl_test.get("answer"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Test the Data Quality Agent
+
+# COMMAND ----------
+
+quality_test = ask_agent(
+    "Check null values and invalid records in the Silver layer."
+)
+
+print("Selected route:", quality_test.get("route"))
+print("\nQuality report:")
+print(quality_test.get("quality_result"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Test the Analytics Agent
+
+# COMMAND ----------
+
+analytics_test = ask_agent(
+    "Analyze the top pickup locations by number of trips."
+)
+
+print("Selected route:", analytics_test.get("route"))
+print("\nAnalytics result:")
+print(analytics_test.get("analytics_result"))
+
+print("\nAgent response:")
+print(analytics_test.get("answer"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ##Test the Explanation Agent
+
+# COMMAND ----------
+
+explanation_test = ask_agent(
+    "Explain the purpose of the Bronze, Silver, and Gold layers in this project."
+)
+
+print("Selected route:", explanation_test.get("route"))
+print("\nExplanation:")
+print(explanation_test.get("answer"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Validate Agent Routing
+
+# COMMAND ----------
+
+test_cases = [
+    {
+        "name": "ETL",
+        "query": "Execute the complete ETL pipeline on the NCR ride bookings dataset.",
+        "expected": "run_etl"
+    },
+    {
+        "name": "Quality",
+        "query": "Check null values and invalid records in Silver.",
+        "expected": "quality"
+    },
+    {
+        "name": "Analytics",
+        "query": "Analyze trips and payment information from the Gold layer.",
+        "expected": "analytics"
+    },
+    {
+        "name": "Explanation",
+        "query": "What is the purpose of the Bronze, Silver and Gold architecture?",
+        "expected": "explain"
+    }
+]
+
+routing_results = []
+
+for test in test_cases:
+    response = agent_workflow.invoke({
+        "query": test["query"]
+    })
+
+    actual_route = response.get("route")
+
+    routing_results.append({
+        "Test": test["name"],
+        "Expected Route": test["expected"],
+        "Actual Route": actual_route,
+        "Passed": actual_route == test["expected"]
+    })
+
+# COMMAND ----------
+
+import pandas as pd
+
+routing_df = pd.DataFrame(routing_results)
+
+display(routing_df)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Pipeline Health Summary
+
+# COMMAND ----------
+
+summary = {
+    "ETL Status": etl_status.get("status"),
+    "Quality Status": quality_report.get("status"),
+    "Silver Records": quality_report.get("row_count"),
+    "Invalid Distance": quality_report.get("invalid_distance"),
+    "Invalid Amount": quality_report.get("invalid_amount"),
+    "Invalid Ratings": quality_report.get("invalid_ratings")
+}
+
+summary_df = pd.DataFrame(
+    summary.items(),
+    columns=["Metric", "Result"]
+)
+
+display(summary_df)
+
+# COMMAND ----------
+
+# ============================================================
+# FINAL PIPELINE RUN SUMMARY
+# ============================================================
+
+import time
+import pandas as pd
+from config import (
+    bronze_path,
+    silver_path,
+    quarantine_path
+)
+from etl_pipeline import run_etl
+from quality_checks import run_quality_checks
+
+# ------------------------------------------------------------
+# 1. Run ETL and measure duration
+# ------------------------------------------------------------
+
+start_time = time.perf_counter()
+
+etl_status = run_etl(spark)
+
+end_time = time.perf_counter()
+
+job_duration = end_time - start_time
+
+print("=" * 70)
+print("ETL EXECUTION")
+print("=" * 70)
+print("ETL result:", etl_status)
+print(f"Job duration: {job_duration:.2f} seconds")
+print(f"Job duration: {job_duration / 60:.2f} minutes")
+
+
+# ------------------------------------------------------------
+# 2. Read Bronze and Silver
+# ------------------------------------------------------------
+
+bronze_df = spark.read.format("delta").load(bronze_path)
+silver_df = spark.read.format("delta").load(silver_path)
+
+bronze_count = bronze_df.count()
+silver_count = silver_df.count()
+
+print("\n" + "=" * 70)
+print("MEDALLION LAYER COUNTS")
+print("=" * 70)
+print(f"Bronze row count : {bronze_count:,}")
+print(f"Silver row count : {silver_count:,}")
+
+
+# ------------------------------------------------------------
+# 3. Check quarantine records
+# ------------------------------------------------------------
+
+try:
+    quarantine_df = spark.read.format("delta").load(quarantine_path)
+    quarantine_count = quarantine_df.count()
+
+    print(f"Quarantined records : {quarantine_count:,}")
+
+except Exception:
+    quarantine_count = 0
+    print("Quarantine output was not generated.")
+    print("Quarantined records : 0")
+
+
+# ------------------------------------------------------------
+# 4. Run quality checks
+# ------------------------------------------------------------
+
+quality_report = run_quality_checks(spark)
+
+quality_status = quality_report.get("status", "unknown")
+
+print("\n" + "=" * 70)
+print("QUALITY CHECK RESULTS")
+print("=" * 70)
+
+for metric, value in quality_report.items():
+    print(f"{metric:25}: {value}")
+
+
+
+# ------------------------------------------------------------
+# 5. Fault detection summary
+# ------------------------------------------------------------
+# The current project does not have a separate fault-injection
+# experiment, so we report the quality-rule violations detected
+# during the actual validation run.
+
+faults_detected = (
+    quality_report.get("invalid_distance", 0)
+    + quality_report.get("invalid_amount", 0)
+    + quality_report.get("invalid_ratings", 0)
+)
+
+faults_injected = "Not tested"
+
+
+# ------------------------------------------------------------
+# 6. Create final results table
+# ------------------------------------------------------------
+
+final_results = pd.DataFrame([
+    ["Bronze row count", f"{bronze_count:,}"],
+    ["Silver row count", f"{silver_count:,}"],
+    ["Quarantined records", f"{quarantine_count:,}"],
+    ["Quality checks passed / failed", quality_status.upper()],
+    ["Job duration", f"{job_duration:.2f} seconds"],
+    ["Faults injected / detected",
+     f"{faults_injected} / {faults_detected}"]
+], columns=["Measure", "Value"])
+
+
+# ------------------------------------------------------------
+# 7. Display final summary
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("FINAL RUN RESULTS")
+print("=" * 70)
+
+display(final_results)
